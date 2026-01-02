@@ -16,27 +16,29 @@ API_KEY = st.secrets["POLYGON_API_KEY"]
 
 # Sidebar
 st.sidebar.header("Settings")
-period = st.sidebar.selectbox("Time Period", ["1y", "2y", "max (2y free)"], index=0)
+period_option = st.sidebar.selectbox("Time Period", ["1 Year", "2 Years", "5 Years"], index=0)
+horizon = st.sidebar.selectbox("Prediction Horizon (days)", [1, 5], index=0)
 
-# Map to multiplier/timespan for daily bars
-multiplier = 1
-timespan = "day"
-limit = 50000  # Max allowed, enough for years of daily
+# Calculate dates based on selection (free tier safe: max 5 years recent)
+years_back = {"1 Year": 1, "2 Years": 2, "5 Years": 5}[period_option]
+from_date = (datetime.today() - timedelta(days=years_back * 365)).strftime("%Y-%m-%d")
+to_date = datetime.today().strftime("%Y-%m-%d")
 
 # Fetch data
 @st.cache_data(ttl=3600)
 def get_data():
-    url = f"https://api.polygon.io/v2/aggs/ticker/TSLA/range/{multiplier}/{timespan}/{period}?adjusted=true&limit={limit}&apiKey={API_KEY}"
+    url = f"https://api.polygon.io/v2/aggs/ticker/TSLA/range/1/day/{from_date}/{to_date}?adjusted=true&sort=asc&limit=50000&apiKey={API_KEY}"
     response = requests.get(url)
     data = response.json()
     
     if "results" not in data:
-        st.error(f"Error: {data.get('error', 'No data or API issue')}. Check key or try shorter period.")
+        error_msg = data.get("error", data.get("message", "Unknown error"))
+        st.error(f"Polygon API error: {error_msg}. Check key, limits, or try shorter period.")
         return pd.DataFrame()
     
     df = pd.DataFrame(data["results"])
-    df["date"] = pd.to_datetime(df["t"], unit="ms")
-    df = df.set_index("date")
+    df["Date"] = pd.to_datetime(df["t"], unit="ms")
+    df = df.set_index("Date")
     df = df.rename(columns={"o": "Open", "h": "High", "l": "Low", "c": "Close", "v": "Volume"})
     df = df[["Open", "High", "Low", "Close", "Volume"]]
     return df.sort_index()
@@ -45,7 +47,7 @@ df = get_data()
 if df.empty:
     st.stop()
 
-# Indicators
+# Indicators (pure pandas)
 df["SMA20"] = df["Close"].rolling(20).mean()
 df["SMA50"] = df["Close"].rolling(50).mean()
 
@@ -68,12 +70,48 @@ df["BB_Lower"] = df["BB_Middle"] - 2 * std
 
 plot_df = df.dropna().reset_index()
 
-# Tabs (same layout)
+# Tabs
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Candlestick + Volume", "Moving Averages", "RSI", "MACD", "Bollinger Bands", "Prediction"])
 
-# (Same chart code as previous yfinance version — copy from my last yfinance message if needed, using plot_df["date"] as x)
+with tab1:
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(x=plot_df["Date"], open=plot_df["Open"], high=plot_df["High"],
+                                 low=plot_df["Low"], close=plot_df["Close"]))
+    fig.add_trace(go.Bar(x=plot_df["Date"], y=plot_df["Volume"], name="Volume", yaxis="y2"))
+    fig.update_layout(title="TSLA Candlestick + Volume", yaxis2=dict(overlaying="y", side="right"))
+    st.plotly_chart(fig, use_container_width=True)
 
-# Prediction tab (same as before)
+with tab2:
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["Close"], name="Close"))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["SMA20"], name="SMA 20"))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["SMA50"], name="SMA 50"))
+    fig.update_layout(title="Moving Averages")
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab3:
+    fig = go.Figure(go.Scatter(x=plot_df["Date"], y=plot_df["RSI"], name="RSI"))
+    fig.add_hline(y=70, line_dash="dash", line_color="red")
+    fig.add_hline(y=30, line_dash="dash", line_color="green")
+    fig.update_layout(title="RSI (14)", yaxis=dict(range=[0, 100]))
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab4:
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["MACD"], name="MACD"))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["Signal"], name="Signal"))
+    fig.add_trace(go.Bar(x=plot_df["Date"], y=plot_df["MACD_Hist"], name="Histogram"))
+    fig.update_layout(title="MACD")
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab5:
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["Close"], name="Close"))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["BB_Upper"], name="Upper Band", line=dict(dash="dash")))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["BB_Middle"], name="Middle Band"))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["BB_Lower"], name="Lower Band", line=dict(dash="dash")))
+    fig.update_layout(title="Bollinger Bands")
+    st.plotly_chart(fig, use_container_width=True)
 
 with tab6:
     st.subheader("Simple Buy/Sell Signal")
@@ -90,8 +128,4 @@ with tab6:
     
     st.markdown(f"### Next {horizon} day(s): **{signal}**")
     st.write(f"Close: ${latest['Close']:.2f} | RSI: {latest['RSI']:.1f}")
-    st.caption("Educational only.")
-
-# Paste the full chart code from my previous yfinance message for the tabs — it's identical.
-
-### `requirements.txt`
+    st.caption("Educational only — not financial advice.")
