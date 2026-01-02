@@ -11,7 +11,7 @@ st.title("🚗 Tesla (TSLA) Stock Technical Analysis - Last 1 Year")
 end_date = datetime.today()
 start_date = end_date - timedelta(days=365)
 
-# Fetch data with strong caching and error handling
+# Fetch data with strong caching and friendly error
 @st.cache_data(ttl=3600, show_spinner="Fetching last 1 year TSLA data...")
 def get_data():
     try:
@@ -20,14 +20,14 @@ def get_data():
             raise ValueError("No data returned.")
         return df
     except Exception as e:
-        st.error("Temporary Yahoo Finance rate limit (common on free Streamlit tier). Wait 30-60 minutes and rerun. It will work after the limit clears.")
+        st.error("Temporary Yahoo Finance rate limit (very common on free Streamlit). Wait 30-60 minutes and click 'Rerun' — it WILL work after the limit clears!")
         return pd.DataFrame()
 
 df = get_data()
 if df.empty:
     st.stop()
 
-# Indicators with pure pandas
+# Indicators (pure pandas - no extra libs)
 df["SMA20"] = df["Close"].rolling(window=20).mean()
 df["SMA50"] = df["Close"].rolling(window=50).mean()
 
@@ -50,7 +50,7 @@ df["BB_Lower"] = df["BB_Middle"] - (bb_std * 2)
 
 plot_df = df.dropna().reset_index()
 
-# Prediction horizon selector
+# Prediction horizon
 horizon = st.sidebar.selectbox("Prediction Horizon (days)", [1, 5])
 
 # Tabs
@@ -97,13 +97,11 @@ with tab5:
     st.plotly_chart(fig, use_container_width=True)
 
 with tab6:
-    st.subheader("Simple Rule-Based Buy/Sell Signal Prediction")
+    st.subheader("Simple Rule-Based Buy/Sell Signal")
     latest = df.iloc[-1]
     signals = []
-    if latest["RSI"] < 30:
-        signals.append("Buy")
-    elif latest["RSI"] > 70:
-        signals.append("Sell")
+    if latest["RSI"] < 30: signals.append("Buy")
+    elif latest["RSI"] > 70: signals.append("Sell")
     signals.append("Buy" if latest["MACD"] > latest["Signal"] else "Sell")
     signals.append("Buy" if latest["Close"] > latest["SMA20"] else "Sell")
     
@@ -112,6 +110,5 @@ with tab6:
     overall = "🟢 Buy" if buy_count > sell_count else "🔴 Sell" if sell_count > buy_count else "🟡 Hold"
     
     st.markdown(f"### Signal for next {horizon} day(s): **{overall}**")
-    st.write(f"Latest Close: ${latest['Close']:.2f}")
-    st.write(f"RSI: {latest['RSI']:.1f} | MACD vs Signal: {'Above (Bullish)' if latest['MACD'] > latest['Signal'] else 'Below (Bearish)'}")
-    st.caption("Simple rule-based (RSI + MACD crossover + SMA20). Educational only — not financial advice.")
+    st.write(f"Latest Close: ${latest['Close']:.2f} | RSI: {latest['RSI']:.1f}")
+    st.caption("Educational only — not financial advice.")
