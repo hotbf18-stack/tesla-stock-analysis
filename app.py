@@ -7,9 +7,9 @@ from datetime import datetime
 st.set_page_config(page_title="TSLA Analysis", layout="wide")
 st.title("🚗 Tesla (TSLA) Stock Technical Analysis")
 
-# Securely get API key (you'll set this in Streamlit secrets)
+# Secure API key from secrets
 if "ALPHA_VANTAGE_API_KEY" not in st.secrets:
-    st.error("Please add your Alpha Vantage API key in Streamlit secrets (see instructions below).")
+    st.error("Alpha Vantage API key not found. Add it in app settings > Secrets.")
     st.stop()
 
 API_KEY = st.secrets["ALPHA_VANTAGE_API_KEY"]
@@ -19,33 +19,31 @@ st.sidebar.header("Settings")
 period = st.sidebar.selectbox("Time Period", ["1Y", "2Y", "5Y", "10Y", "MAX"], index=0)
 horizon = st.sidebar.selectbox("Prediction Horizon", [1, 5], index=0)
 
-# Map period to Alpha Vantage outputsize
 outputsize = "full" if period == "MAX" else "compact"
 
-# Fetch data
-@st.cache_data(ttl=3600)  # Cache for 1 hour
+# Fetch data (using free non-adjusted daily endpoint)
+@st.cache_data(ttl=3600)
 def get_data():
-    url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=TSLA&outputsize={outputsize}&apikey={API_KEY}"
+    url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=TSLA&outputsize={outputsize}&apikey={API_KEY}"
     response = requests.get(url)
     data = response.json()
     
     if "Time Series (Daily)" not in data:
-        st.error(f"Error fetching data: {data.get('Note', data.get('Information', 'Unknown error'))}")
+        st.error(f"Error: {data.get('Note', data.get('Information', 'Unknown API error'))}")
         return pd.DataFrame()
     
     df = pd.DataFrame.from_dict(data["Time Series (Daily)"], orient="index")
     df = df.astype(float)
     df.index = pd.to_datetime(df.index)
     df = df.sort_index()
-    df.columns = ["Open", "High", "Low", "Close", "Adjusted Close", "Volume", "Dividend", "Split"]
-    df = df[["Open", "High", "Low", "Close", "Volume"]]  # Keep main columns
+    df.columns = ["Open", "High", "Low", "Close", "Volume"]
     return df
 
 df = get_data()
 if df.empty:
     st.stop()
 
-# Indicators (pure pandas — no extra libs)
+# Indicators (pure pandas)
 df["SMA20"] = df["Close"].rolling(20).mean()
 df["SMA50"] = df["Close"].rolling(50).mean()
 
@@ -125,5 +123,4 @@ with tab6:
     signal = "🟢 BUY" if buy > sell else "🔴 SELL" if sell > buy else "🟡 HOLD"
     
     st.markdown(f"### Next {horizon} day(s): **{signal}**")
-    st.write(f"Close: ${latest['Close']:.2f} | RSI: {latest['RSI']:.1f}")
-    st.caption("Educational only — not financial advice.")
+    st.write(f"Close: ${latest['Close']:.2f} | RSI: {latest['RS
