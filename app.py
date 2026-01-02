@@ -1,51 +1,39 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
-import requests
 from datetime import datetime, timedelta
 
 st.set_page_config(page_title="TSLA Analysis", layout="wide")
-st.title("🚗 Tesla (TSLA) Stock Technical Analysis")
+st.title("🚗 Tesla (TSLA) Stock Technical Analysis - Last 1 Year")
 
-# Sidebar
-st.sidebar.header("Settings")
-period_option = st.sidebar.selectbox("Time Period", ["1 Year", "2 Years", "5 Years", "7+ Years"], index=0)
-horizon = st.sidebar.selectbox("Prediction Horizon (days)", [1, 5], index=0)
+# Fixed to last 1 year of data
+end_date = datetime.today()
+start_date = end_date - timedelta(days=365)
 
-# Map to years back
-years_back = {"1 Year": 1, "2 Years": 2, "5 Years": 5, "7+ Years": 7}[period_option]
-from_date = (datetime.today() - timedelta(days=years_back * 365 + 100)).strftime("%Y-%m-%d")  # Extra buffer
-to_date = datetime.today().strftime("%Y-%m-%d")
-
-# Fetch data from StockData.org (free, no key)
-@st.cache_data(ttl=3600)
+# Fetch data with strong caching and error handling
+@st.cache_data(ttl=3600, show_spinner="Fetching last 1 year TSLA data...")
 def get_data():
-    url = f"https://api.stockdata.org/v1/data/eod?symbols=TSLA&from_date={from_date}&to_date={to_date}&api_token=demo"  # "demo" works for free access
-    response = requests.get(url)
-    data = response.json()
-    
-    if "data" not in data or not data["data"]:
-        st.error("No data returned from StockData.org. Try a shorter period or rerun later.")
+    try:
+        df = yf.download("TSLA", start=start_date, end=end_date + timedelta(days=1), progress=False)
+        if df.empty:
+            raise ValueError("No data returned.")
+        return df
+    except Exception as e:
+        st.error("Temporary Yahoo Finance rate limit (common on free Streamlit tier). Wait 30-60 minutes and rerun. It will work after the limit clears.")
         return pd.DataFrame()
-    
-    df = pd.DataFrame(data["data"])
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.set_index("date")
-    df = df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"})
-    df = df[["Open", "High", "Low", "Close", "Volume"]]
-    return df.sort_index()
 
 df = get_data()
 if df.empty:
     st.stop()
 
-# Indicators (pure pandas)
-df["SMA20"] = df["Close"].rolling(20).mean()
-df["SMA50"] = df["Close"].rolling(50).mean()
+# Indicators with pure pandas
+df["SMA20"] = df["Close"].rolling(window=20).mean()
+df["SMA50"] = df["Close"].rolling(window=50).mean()
 
 delta = df["Close"].diff()
-gain = delta.where(delta > 0, 0).rolling(14).mean()
-loss = -delta.where(delta < 0, 0).rolling(14).mean()
+gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
 rs = gain / loss
 df["RSI"] = 100 - (100 / (1 + rs))
 
@@ -55,43 +43,75 @@ df["MACD"] = ema12 - ema26
 df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
 df["MACD_Hist"] = df["MACD"] - df["Signal"]
 
-df["BB_Middle"] = df["Close"].rolling(20).mean()
-std = df["Close"].rolling(20).std()
-df["BB_Upper"] = df["BB_Middle"] + 2 * std
-df["BB_Lower"] = df["BB_Middle"] - 2 * std
+df["BB_Middle"] = df["Close"].rolling(window=20).mean()
+bb_std = df["Close"].rolling(window=20).std()
+df["BB_Upper"] = df["BB_Middle"] + (bb_std * 2)
+df["BB_Lower"] = df["BB_Middle"] - (bb_std * 2)
 
 plot_df = df.dropna().reset_index()
 
-# Tabs (same as before)
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Candlestick + Volume", "Moving Averages", "RSI", "MACD", "Bollinger Bands", "Prediction"])
+# Prediction horizon selector
+horizon = st.sidebar.selectbox("Prediction Horizon (days)", [1, 5])
+
+# Tabs
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Candlestick + Volume", "Moving Averages", "RSI", "MACD", "Bollinger Bands", "Buy/Sell Prediction"])
 
 with tab1:
     fig = go.Figure()
-    fig.add_trace(go.Candlestick(x=plot_df["date"], open=plot_df["Open"], high=plot_df["High"],
-                                 low=plot_df["Low"], close=plot_df["Close"]))
-    fig.add_trace(go.Bar(x=plot_df["date"], y=plot_df["Volume"], name="Volume", yaxis="y2"))
-    fig.update_layout(title="TSLA Candlestick + Volume", yaxis2=dict(overlaying="y", side="right"))
+    fig.add_trace(go.Candlestick(x=plot_df["Date"], open=plot_df["Open"], high=plot_df["High"],
+                                 low=plot_df["Low"], close=plot_df["Close"], name="Price"))
+    fig.add_trace(go.Bar(x=plot_df["Date"], y=plot_df["Volume"], name="Volume", yaxis="y2"))
+    fig.update_layout(title="TSLA Candlestick + Volume (Last 1 Year)", yaxis2=dict(title="Volume", overlaying="y", side="right"))
     st.plotly_chart(fig, use_container_width=True)
 
-# (Add the other tabs from previous code - Moving Averages, RSI, MACD, Bollinger Bands - same as before)
+with tab2:
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["Close"], name="Close"))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["SMA20"], name="SMA 20"))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["SMA50"], name="SMA 50"))
+    fig.update_layout(title="Moving Averages (20 & 50)")
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab3:
+    fig = go.Figure(go.Scatter(x=plot_df["Date"], y=plot_df["RSI"], name="RSI"))
+    fig.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Overbought")
+    fig.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Oversold")
+    fig.update_layout(title="RSI (14)", yaxis=dict(range=[0, 100]))
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab4:
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["MACD"], name="MACD"))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["Signal"], name="Signal"))
+    fig.add_trace(go.Bar(x=plot_df["Date"], y=plot_df["MACD_Hist"], name="Histogram"))
+    fig.update_layout(title="MACD")
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab5:
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["Close"], name="Close"))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["BB_Upper"], name="Upper Band", line=dict(dash="dash")))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["BB_Middle"], name="Middle Band"))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["BB_Lower"], name="Lower Band", line=dict(dash="dash")))
+    fig.update_layout(title="Bollinger Bands (20, 2)")
+    st.plotly_chart(fig, use_container_width=True)
 
 with tab6:
-    st.subheader("Simple Buy/Sell Signal")
+    st.subheader("Simple Rule-Based Buy/Sell Signal Prediction")
     latest = df.iloc[-1]
     signals = []
-    if latest["RSI"] < 30: signals.append("Buy")
-    elif latest["RSI"] > 70: signals.append("Sell")
+    if latest["RSI"] < 30:
+        signals.append("Buy")
+    elif latest["RSI"] > 70:
+        signals.append("Sell")
     signals.append("Buy" if latest["MACD"] > latest["Signal"] else "Sell")
     signals.append("Buy" if latest["Close"] > latest["SMA20"] else "Sell")
     
-    buy = signals.count("Buy")
-    sell = signals.count("Sell")
-    signal = "🟢 BUY" if buy > sell else "🔴 SELL" if sell > buy else "🟡 HOLD"
+    buy_count = signals.count("Buy")
+    sell_count = signals.count("Sell")
+    overall = "🟢 Buy" if buy_count > sell_count else "🔴 Sell" if sell_count > buy_count else "🟡 Hold"
     
-    st.markdown(f"### Next {horizon} day(s): **{signal}**")
-    st.write(f"Close: ${latest['Close']:.2f} | RSI: {latest['RSI']:.1f}")
-    st.caption("Educational only — not financial advice.")
-
-# Full tabs code is the same as my last yfinance version — just replace "Date" with "date" if needed.
-
-### `requirements.txt`
+    st.markdown(f"### Signal for next {horizon} day(s): **{overall}**")
+    st.write(f"Latest Close: ${latest['Close']:.2f}")
+    st.write(f"RSI: {latest['RSI']:.1f} | MACD vs Signal: {'Above (Bullish)' if latest['MACD'] > latest['Signal'] else 'Below (Bearish)'}")
+    st.caption("Simple rule-based (RSI + MACD crossover + SMA20). Educational only — not financial advice.")
