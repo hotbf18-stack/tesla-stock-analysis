@@ -1,157 +1,129 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import pandas_ta as ta
-from sklearn.linear_model import LinearRegression
+import requests
+from datetime import datetime
 
-# App title
-st.title("Tesla (TSLA) Stock Technical Analysis & Simple Prediction")
+st.set_page_config(page_title="TSLA Analysis", layout="wide")
+st.title("🚗 Tesla (TSLA) Stock Technical Analysis")
 
-# Sidebar inputs
+# Securely get API key (you'll set this in Streamlit secrets)
+if "ALPHA_VANTAGE_API_KEY" not in st.secrets:
+    st.error("Please add your Alpha Vantage API key in Streamlit secrets (see instructions below).")
+    st.stop()
+
+API_KEY = st.secrets["ALPHA_VANTAGE_API_KEY"]
+
+# Sidebar
 st.sidebar.header("Settings")
-end_date = st.sidebar.date_input("End Date", datetime.today())
-start_date = st.sidebar.date_input("Start Date", end_date - timedelta(days=365))
+period = st.sidebar.selectbox("Time Period", ["1Y", "2Y", "5Y", "10Y", "MAX"], index=0)
+horizon = st.sidebar.selectbox("Prediction Horizon", [1, 5], index=0)
 
-if start_date > end_date:
-    st.sidebar.error("Start date must be before end date.")
-    st.stop()
+# Map period to Alpha Vantage outputsize
+outputsize = "full" if period == "MAX" else "compact"
 
-horizon = st.sidebar.selectbox("Prediction Horizon (days)", [1, 5])
-
-# Cache data fetching
-@st.cache_data(show_spinner="Fetching TSLA data...")
-def fetch_data(start, end):
-    try:
-        data = yf.download("TSLA", start=start, end=end + timedelta(days=1))
-        if data.empty:
-            st.error("No data returned. Try a different date range.")
-            return None
-        return data
-    except Exception as e:
-        st.error(f"Error fetching data: {e}")
-        return None
-
-data = fetch_data(start_date, end_date)
-if data is None:
-    st.stop()
-
-# Cache indicator calculation
-@st.cache_data(show_spinner="Calculating indicators...")
-def calculate_indicators(df):
-    df = df.copy()
-    df["SMA_20"] = ta.sma(df["Close"], length=20)
-    df["SMA_50"] = ta.sma(df["Close"], length=50)
-    df["RSI"] = ta.rsi(df["Close"], length=14)
-
-    macd_df = ta.macd(df["Close"])
-    df = pd.concat([df, macd_df], axis=1)
-
-    bb_df = ta.bbands(df["Close"], length=20, std=2)
-    df = pd.concat([df, bb_df], axis=1)
-
+# Fetch data
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def get_data():
+    url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=TSLA&outputsize={outputsize}&apikey={API_KEY}"
+    response = requests.get(url)
+    data = response.json()
+    
+    if "Time Series (Daily)" not in data:
+        st.error(f"Error fetching data: {data.get('Note', data.get('Information', 'Unknown error'))}")
+        return pd.DataFrame()
+    
+    df = pd.DataFrame.from_dict(data["Time Series (Daily)"], orient="index")
+    df = df.astype(float)
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+    df.columns = ["Open", "High", "Low", "Close", "Adjusted Close", "Volume", "Dividend", "Split"]
+    df = df[["Open", "High", "Low", "Close", "Volume"]]  # Keep main columns
     return df
 
-data_with_ind = calculate_indicators(data)
-
-# FIXED: Use plain string list for subset (no variables that could be interpreted as NaN)
-plot_df = data_with_ind.dropna(subset=["SMA_20", "SMA_50", "RSI", "MACD_12_26_9", "BBU_20_2.0"])
-
-if plot_df.empty:
-    st.error("Not enough data to calculate indicators. Try a longer date range (at least 1-2 years).")
+df = get_data()
+if df.empty:
     st.stop()
 
-df_plot = plot_df.reset_index()
+# Indicators (pure pandas — no extra libs)
+df["SMA20"] = df["Close"].rolling(20).mean()
+df["SMA50"] = df["Close"].rolling(50).mean()
 
-# Chart selection
-chart_type = st.selectbox("Select Chart Type", [
-    "Candlestick", "Moving Averages", "RSI", "MACD",
-    "Bollinger Bands", "Volume"
-])
+delta = df["Close"].diff()
+gain = delta.where(delta > 0, 0).rolling(14).mean()
+loss = -delta.where(delta < 0, 0).rolling(14).mean()
+rs = gain / loss
+df["RSI"] = 100 - (100 / (1 + rs))
 
-# Create figure
-fig = go.Figure()
+ema12 = df["Close"].ewm(span=12, adjust=False).mean()
+ema26 = df["Close"].ewm(span=26, adjust=False).mean()
+df["MACD"] = ema12 - ema26
+df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
+df["MACD_Hist"] = df["MACD"] - df["Signal"]
 
-if chart_type == "Candlestick":
-    fig.add_trace(go.Candlestick(x=df_plot["Date"],
-                                 open=df_plot["Open"],
-                                 high=df_plot["High"],
-                                 low=df_plot["Low"],
-                                 close=df_plot["Close"]))
-    fig.update_layout(title="TSLA Candlestick Chart")
+df["BB_Middle"] = df["Close"].rolling(20).mean()
+std = df["Close"].rolling(20).std()
+df["BB_Upper"] = df["BB_Middle"] + 2 * std
+df["BB_Lower"] = df["BB_Middle"] - 2 * std
 
-elif chart_type == "Moving Averages":
-    fig.add_trace(go.Scatter(x=df_plot["Date"], y=df_plot["Close"], name="Close"))
-    fig.add_trace(go.Scatter(x=df_plot["Date"], y=df_plot["SMA_20"], name="SMA 20"))
-    fig.add_trace(go.Scatter(x=df_plot["Date"], y=df_plot["SMA_50"], name="SMA 50"))
-    fig.update_layout(title="Moving Averages (20 & 50)")
+plot_df = df.dropna().reset_index()
 
-elif chart_type == "RSI":
-    fig.add_trace(go.Scatter(x=df_plot["Date"], y=df_plot["RSI"], name="RSI"))
-    fig.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Overbought")
-    fig.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Oversold")
-    fig.update_layout(title="RSI (14)", yaxis_range=[0, 100])
+# Tabs
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Candlestick", "Moving Averages", "RSI", "MACD", "Bollinger Bands", "Prediction"])
 
-elif chart_type == "MACD":
-    fig.add_trace(go.Scatter(x=df_plot["Date"], y=df_plot["MACD_12_26_9"], name="MACD"))
-    fig.add_trace(go.Scatter(x=df_plot["Date"], y=df_plot["MACDs_12_26_9"], name="Signal"))
-    hist = df_plot["MACDh_12_26_9"].fillna(0)
-    fig.add_trace(go.Bar(x=df_plot["Date"], y=hist, name="Histogram"))
+with tab1:
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(x=plot_df["Date"], open=plot_df["Open"], high=plot_df["High"],
+                                 low=plot_df["Low"], close=plot_df["Close"]))
+    fig.add_trace(go.Bar(x=plot_df["Date"], y=plot_df["Volume"], name="Volume", yaxis="y2"))
+    fig.update_layout(title="TSLA Candlestick + Volume", yaxis2=dict(overlaying="y", side="right"))
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab2:
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["Close"], name="Close"))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["SMA20"], name="SMA 20"))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["SMA50"], name="SMA 50"))
+    fig.update_layout(title="Moving Averages")
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab3:
+    fig = go.Figure(go.Scatter(x=plot_df["Date"], y=plot_df["RSI"], name="RSI"))
+    fig.add_hline(y=70, line_dash="dash", line_color="red")
+    fig.add_hline(y=30, line_dash="dash", line_color="green")
+    fig.update_layout(title="RSI (14)", yaxis=dict(range=[0, 100]))
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab4:
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["MACD"], name="MACD"))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["Signal"], name="Signal"))
+    fig.add_trace(go.Bar(x=plot_df["Date"], y=plot_df["MACD_Hist"], name="Histogram"))
     fig.update_layout(title="MACD")
+    st.plotly_chart(fig, use_container_width=True)
 
-elif chart_type == "Bollinger Bands":
-    fig.add_trace(go.Scatter(x=df_plot["Date"], y=df_plot["Close"], name="Close"))
-    fig.add_trace(go.Scatter(x=df_plot["Date"], y=df_plot["BBU_20_2.0"], name="Upper Band", line=dict(dash="dash")))
-    fig.add_trace(go.Scatter(x=df_plot["Date"], y=df_plot["BBM_20_2.0"], name="Middle Band"))
-    fig.add_trace(go.Scatter(x=df_plot["Date"], y=df_plot["BBL_20_2.0"], name="Lower Band", line=dict(dash="dash")))
-    fig.update_layout(title="Bollinger Bands (20, 2)")
+with tab5:
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["Close"], name="Close"))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["BB_Upper"], name="Upper", line=dict(dash="dash")))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["BB_Middle"], name="Middle"))
+    fig.add_trace(go.Scatter(x=plot_df["Date"], y=plot_df["BB_Lower"], name="Lower", line=dict(dash="dash")))
+    fig.update_layout(title="Bollinger Bands")
+    st.plotly_chart(fig, use_container_width=True)
 
-elif chart_type == "Volume":
-    fig.add_trace(go.Bar(x=df_plot["Date"], y=df_plot["Volume"]))
-    fig.update_layout(title="Trading Volume")
-
-fig.update_layout(xaxis_title="Date", yaxis_title="Value", height=600)
-st.plotly_chart(fig, use_container_width=True)
-
-# Prediction section - also fixed dropna
-st.header(f"Simple Buy/Sell Signal Prediction (Next {horizon} Day{'s' if horizon > 1 else ''})")
-
-def predict_signal(df_full, horizon_days):
-    df = df_full.dropna(subset=["Close", "RSI", "MACD_12_26_9", "MACDs_12_26_9"])
-    if df.empty:
-        return "Insufficient Data", []
-
-    df = df.copy()
-    df["DayNum"] = np.arange(len(df))
-
-    model = LinearRegression()
-    model.fit(df[["DayNum"]], df["Close"])
-    future_days = np.arange(len(df), len(df) + horizon_days).reshape(-1, 1)
-    pred_prices = model.predict(future_days)
-    avg_pred = np.mean(pred_prices)
-    current_price = df["Close"].iloc[-1]
-
-    trend = "Buy" if avg_pred > current_price * 1.005 else "Sell" if avg_pred < current_price * 0.995 else "Hold"
-    rsi = df["RSI"].iloc[-1]
-    rsi_sig = "Buy" if rsi < 30 else "Sell" if rsi > 70 else "Hold"
-    macd_sig = "Buy" if df["MACD_12_26_9"].iloc[-1] > df["MACDs_12_26_9"].iloc[-1] else "Sell" if df["MACD_12_26_9"].iloc[-1] < df["MACDs_12_26_9"].iloc[-1] else "Hold"
-
-    votes = [trend, rsi_sig, macd_sig]
-    if votes.count("Buy") >= 2:
-        overall = "🟢 Buy"
-    elif votes.count("Sell") >= 2:
-        overall = "🔴 Sell"
-    else:
-        overall = "🟡 Hold"
-
-    return overall, pred_prices.round(2).tolist()
-
-signal, pred_prices = predict_signal(data_with_ind, horizon)
-st.markdown(f"### Overall Signal: **{signal}**")
-if pred_prices:
-    st.write(f"Predicted closing prices for next {horizon} day(s): {pred_prices}")
-else:
-    st.write("Not enough data for prediction.")
-st.caption("Note: This is a simple educational model using technical indicators and linear trend. Not financial advice.")
+with tab6:
+    st.subheader("Simple Buy/Sell Signal")
+    latest = df.iloc[-1]
+    signals = []
+    if latest["RSI"] < 30: signals.append("Buy")
+    elif latest["RSI"] > 70: signals.append("Sell")
+    signals.append("Buy" if latest["MACD"] > latest["Signal"] else "Sell")
+    signals.append("Buy" if latest["Close"] > latest["SMA20"] else "Sell")
+    
+    buy = signals.count("Buy")
+    sell = signals.count("Sell")
+    signal = "🟢 BUY" if buy > sell else "🔴 SELL" if sell > buy else "🟡 HOLD"
+    
+    st.markdown(f"### Next {horizon} day(s): **{signal}**")
+    st.write(f"Close: ${latest['Close']:.2f} | RSI: {latest['RSI']:.1f}")
+    st.caption("Educational only — not financial advice.")
